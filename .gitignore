@@ -4,10 +4,9 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
-.ruff_cache/
-dependencies/
+build/
+dist/
 runs/
-artifacts/
-local/
 *.log

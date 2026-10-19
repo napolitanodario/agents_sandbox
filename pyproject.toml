@@ -1,0 +1,38 @@
+# setuptools builds the package and installs its editable source-tree mapping.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+# Package metadata for the host-side controller. Infrastructure is in Compose.
+[project]
+name = "agents-sandbox"
+version = "0.1.0"
+description = "Minimal Harness2, OpenSandbox, and Langfuse integration."
+# Match the Python range supported by the pinned Harness2 source revision.
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  # Pin Harness2 to the exact adapter and scheduler interfaces used by the code.
+  "harness2 @ git+https://github.com/google-research/harness2.git@1cfe254e8d25b15f37048c3730134686abe60335",
+  # The SDK manages workloads; the corresponding server runs in its container.
+  "opensandbox==1.1.1",
+  # SDK v5 is paired with the Langfuse v4 server defined in compose.yaml.
+  "langfuse==5.0.2",
+  # Load generated .env values without putting credentials into tracked code.
+  "python-dotenv==1.2.4",
+]
+
+[project.optional-dependencies]
+# PyYAML lets tests inspect Compose structure without requiring Docker.
+dev = ["pytest==9.1.1", "PyYAML==6.0.3"]
+
+[project.scripts]
+# pip generates .venv/bin/agents-sandbox as a wrapper around runner.main().
+agents-sandbox = "agents_sandbox.runner:main"
+
+[tool.setuptools.packages.find]
+# Use the src layout so repository files are not accidentally packaged.
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Keep test discovery within the authored offline integration suite.
+testpaths = ["tests"]

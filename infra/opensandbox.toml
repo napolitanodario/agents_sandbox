@@ -1,0 +1,47 @@
+# OpenSandbox control-server configuration. The API key is injected by Compose
+# through OPENSANDBOX_SERVER_API_KEY rather than stored in this tracked file.
+[server]
+# The server container uses host networking, so loopback limits API exposure.
+host = "127.0.0.1"
+port = 8080
+# Cap the timeout accepted on creation; the runner requests 120 seconds.
+max_sandbox_timeout_seconds = 300
+
+[runtime]
+# Docker is the backend used to create and destroy workload containers.
+type = "docker"
+# execd supplies the command and file services inside a sandbox.
+execd_image = "opensandbox/execd:v1.1.0"
+
+[docker]
+# Workloads use bridge networking even though the control server uses host mode.
+network_mode = "bridge"
+# Workload endpoints are published locally and reached through the server proxy.
+publish_host = "127.0.0.1"
+# Reduce workload privileges and cap the number of processes they can create.
+no_new_privileges = true
+pids_limit = 256
+drop_capabilities = ["NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "MKNOD"]
+
+[proxy]
+# Proxy to host-mapped ports rather than requiring routes to container bridge IPs.
+resolve_internal = false
+
+[egress]
+# A separate sidecar enforces policies requested by SandboxSync.create().
+image = "opensandbox/egress:v1.1.7"
+# Combine DNS filtering with packet-level nftables rules. Merely placing a
+# workload in a container would not establish this outbound network policy.
+mode = "dns+nft"
+# Allow the network enforcement component to initialize before execution begins.
+readiness_timeout_seconds = 30.0
+
+[storage]
+# No workloads in this setup request host mounts. Keep the allowlist narrow.
+# This path is a permitted prefix, not a mount that is automatically attached.
+allowed_host_paths = ["/var/empty/agents-sandbox"]
+
+[store]
+# Persist control-server metadata in the named volume mounted by Compose.
+type = "sqlite"
+path = "/var/lib/opensandbox/opensandbox.db"

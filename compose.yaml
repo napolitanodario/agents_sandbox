@@ -1,0 +1,198 @@
+# Local infrastructure only. The Harness2 controller runs in the host .venv;
+# OpenSandbox creates additional, disposable workload containers through Docker.
+# Compose reads generated credentials from the untracked root .env file.
+name: agents-sandbox
+
+# YAML anchor shared by Langfuse's web process and background worker. Expressions
+# using :? stop configuration when a required secret has not been initialized.
+x-langfuse-environment: &langfuse-environment
+  # PostgreSQL stores transactional data, such as projects and authentication.
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Run init_env.py}@postgres:5432/langfuse
+  # Browser-facing origin used to build login callbacks and application links.
+  NEXTAUTH_URL: ${LANGFUSE_BASE_URL:-http://localhost:3000}
+  # Separate values protect hashing and encrypted data stored by Langfuse.
+  SALT: ${SALT:?Run init_env.py}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run init_env.py}
+  # Disable Langfuse product telemetry; our runner's local traces still work.
+  TELEMETRY_ENABLED: "false"
+  # ClickHouse stores observation data. The native port is used for migrations;
+  # the HTTP port handles normal analytical access inside the Compose network.
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: langfuse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run init_env.py}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # Redis provides the queue used to hand ingestion work to the worker process.
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${REDIS_PASSWORD:?Run init_env.py}
+  REDIS_TLS_ENABLED: "false"
+  # MinIO implements the S3-compatible storage required for raw ingestion events.
+  # Service names resolve inside Docker's network, not on the host machine.
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Run init_env.py}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  # Media shares the bucket but uses a separate prefix. Browser-facing media
+  # access is overridden on langfuse-web to use the host-published MinIO port.
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Run init_env.py}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  # Scheduled bulk exports are unnecessary for this minimal local integration.
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+
+services:
+  # Trusted control plane. It manages Docker containers on behalf of the runner;
+  # the workloads it creates do not inherit its mounts or credentials.
+  opensandbox:
+    build:
+      context: .
+      dockerfile: infra/opensandbox.Dockerfile
+    # Host networking lets the server reach loopback-published workload ports.
+    # The server itself binds to 127.0.0.1 through infra/opensandbox.toml.
+    network_mode: host
+    environment:
+      OPENSANDBOX_SERVER_API_KEY: ${OPEN_SANDBOX_API_KEY:?Run init_env.py}
+    volumes:
+      # Docker daemon access is intentionally limited to this control service.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The checked-in server configuration is read-only inside the container.
+      - ./infra/opensandbox.toml:/app/opensandbox.toml:ro
+      # Retain server metadata across infrastructure restarts.
+      - opensandbox-data:/var/lib/opensandbox
+    healthcheck:
+      # This checks API readiness, not whether a workload can actually execute.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 5s
+      timeout: 6s
+      retries: 20
+
+  # Local UI and API. Its version matches the worker and supports Python SDK v5.
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.63.0
+    # Wait for storage and queue services before starting web and worker processes.
+    depends_on: &langfuse-dependencies
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      # Expose the UI only through the host's loopback interface.
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Merge common settings, then add web-specific values and bootstrap data.
+      <<: *langfuse-environment
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Run init_env.py}
+      # The browser reaches the host port; server-side requests use minio:9000.
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # Headless initialization creates these resources when absent. Existing
+      # database credentials are not rotated just because .env later changes.
+      LANGFUSE_INIT_ORG_ID: agents-sandbox
+      LANGFUSE_INIT_ORG_NAME: Agents Sandbox
+      LANGFUSE_INIT_PROJECT_ID: agents-sandbox
+      LANGFUSE_INIT_PROJECT_NAME: Agents Sandbox
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?Run init_env.py}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?Run init_env.py}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_USER_EMAIL:?Run init_env.py}
+      LANGFUSE_INIT_USER_NAME: Developer
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_USER_PASSWORD:?Run init_env.py}
+    healthcheck:
+      # Allow extra startup time for database migrations and initial provisioning.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # Process queued observations asynchronously. No host port is needed here.
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.63.0
+    depends_on: *langfuse-dependencies
+    environment: *langfuse-environment
+
+  # PostgreSQL is reachable by other Compose services without a published port.
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run init_env.py}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Observation storage is persistent. The explicit user is the image's service
+  # account, and both data and internal logs have dedicated named volumes.
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run init_env.py}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Redis is a queue/cache rather than the durable trace database in this setup.
+  redis:
+    image: redis:7
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Run init_env.py}
+    # Avoid evicting queued data under memory pressure. The health command uses
+    # $$ so Compose leaves variable expansion to the shell inside the container.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Run init_env.py}", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Create the bucket directory before starting the S3-compatible object store.
+  # Only its data endpoint is published, for browser media upload/download.
+  minio:
+    image: cgr.dev/chainguard/minio
+    entrypoint: ["sh", "-c"]
+    command: ["mkdir -p /data/langfuse && minio server --address :9000 /data"]
+    environment:
+      MINIO_ROOT_USER: langfuse
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Run init_env.py}
+    ports:
+      - "127.0.0.1:9090:9000"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+# Named volumes survive make down. Removing them explicitly would also remove
+# local service data, including accounts, keys, and accumulated observations.
+volumes:
+  opensandbox-data:
+  postgres-data:
+  clickhouse-data:
+  clickhouse-logs:
+  minio-data:
