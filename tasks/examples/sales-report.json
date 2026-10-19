@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "sales-report-001",
+  "domain": "mixed-workflow",
+  "capabilities": ["commands", "files", "browser"],
+  "prompt": "Read sales.csv. Calculate net revenue as quantity multiplied by unit_price for every row, including negative quantities for returns. Create a self-contained report.html with totals by product and an overall total. Write the calculation code to analysis.py. Serve the report on a loopback HTTP server inside the sandbox, inspect it in Chromium, and save a screenshot plus a short browser verification note. Write all deliverables in English without emoji or em dashes.",
+  "inputs": [
+    {
+      "source": "tasks/fixtures/sales.csv",
+      "destination": "sales.csv"
+    }
+  ],
+  "deliverables": [
+    "analysis.py",
+    "report.html",
+    "report.png",
+    "browser-check.txt"
+  ],
+  "network": {
+    "external_access_required": false
+  },
+  "status": "task_definition_only"
+}

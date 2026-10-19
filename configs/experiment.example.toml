@@ -1,0 +1,37 @@
+# This is a project design configuration. Neither upstream CLI consumes it yet.
+schema_version = 1
+name = "mixed-workflow-baseline"
+task = "tasks/examples/sales-report.json"
+
+[harness]
+engine = "harness2"
+mode = "sequential"
+k = 1
+compare_baseline = true
+executor = "unselected"
+
+[sandbox]
+provider = "opensandbox"
+endpoint = "http://localhost:8080"
+image = "unselected"
+fresh_environment_per_rollout = true
+timeout_seconds = 300
+# Resource limits must be enforced through the selected runtime, not a prompt.
+cpu_limit = "2"
+memory_limit = "2Gi"
+
+[capabilities]
+commands = true
+files = true
+browser = true
+
+[network]
+# These are intended controls, not an installed OpenSandbox policy.
+external_access = "deny"
+allowed_domains = []
+# Add the chosen model endpoint when model-backed execution is configured.
+
+[outputs]
+runs_directory = "runs"
+artifacts_directory = "artifacts"
+publish_automatically = false
